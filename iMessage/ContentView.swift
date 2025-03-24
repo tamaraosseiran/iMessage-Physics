@@ -70,14 +70,15 @@ class MessagePhysicsManager: ObservableObject {
         messageVelocities[messageId] = velocity
         startPhysics()
         
-        // Gentler reset animation
+        // Natural settling animation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             withAnimation(
-                .spring(
-                    response: 0.4,         // Longer response time for softer movement
-                    dampingFraction: 0.8,  // More damping for less bounce
-                    blendDuration: 0.3     // Longer blend for smoother transition
-                )
+                .interpolatingSpring(
+                    mass: 1.2,              // Slightly more mass for more inertia
+                    stiffness: 40,          // Much lower stiffness for gentler return
+                    damping: 8,             // Lower damping for gradual settling
+                    initialVelocity: 0.2    // Subtle initial velocity
+                ).speed(0.7)                // Slow down the overall animation
             ) {
                 self.messageOffsets.removeAll()
                 self.messageVelocities.removeAll()
