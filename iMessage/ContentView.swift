@@ -70,13 +70,13 @@ class MessagePhysicsManager: ObservableObject {
         messageVelocities[messageId] = velocity
         startPhysics()
         
-        // Dramatic reset animation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {  // Shorter initial duration
+        // Gentler reset animation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             withAnimation(
                 .spring(
-                    response: 0.4,    // Faster response
-                    dampingFraction: 0.7,  // Less damping for more bounce
-                    blendDuration: 0.2
+                    response: 0.4,         // Longer response time for softer movement
+                    dampingFraction: 0.8,  // More damping for less bounce
+                    blendDuration: 0.3     // Longer blend for smoother transition
                 )
             ) {
                 self.messageOffsets.removeAll()
@@ -236,7 +236,7 @@ struct ContentView: View {
     private var chatList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: 6) {
                     ForEach(messages) { message in
                         MessageRow(
                             message: message,
@@ -248,6 +248,7 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)
+                .padding(.bottom, 16)
             }
             .onChange(of: messages.count) { _, _ in
                 withAnimation {
@@ -284,20 +285,27 @@ struct ContentView: View {
         
         physicsManager.updateMessages(messages)
         
-        if newMessageText.contains("!!") {
+        if newMessageText.contains("!") {
             dramaticMessageId = newMessage.id
             
+            // Count exclamation marks and calculate intensity with adjusted curve
+            let exclamationCount = newMessageText.filter { $0 == "!" }.count
+            let baseMultiplier = CGFloat(0.4) // Start with a lower base multiplier
+            let intensityMultiplier = baseMultiplier + (CGFloat(min(exclamationCount, 5) - 1) * 0.9)
+            
+            // Scale initial force with adjusted multiplier
             physicsManager.applyShove(
                 to: newMessage.id,
-                velocity: CGSize(width: 0, height: -8000)
+                velocity: CGSize(width: 0, height: -8000 * intensityMultiplier)
             )
             
             let messageCount = messages.count
             for (index, message) in messages.enumerated() {
                 if message.id != newMessage.id && index < messageCount - 1 {
                     let distanceFromNew = messageCount - 1 - index
-                    let forceMagnitude = CGFloat(14000.0 * exp(-Double(distanceFromNew) * 0.3))  // Steeper decay
-                    let delay = 0.02 * Double(distanceFromNew)  // Shorter delay
+                    // Scale force magnitude with adjusted multiplier
+                    let forceMagnitude = CGFloat(14000.0 * intensityMultiplier * exp(-Double(distanceFromNew) * 0.3))
+                    let delay = 0.02 * Double(distanceFromNew)
                     
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         self.physicsManager.applyShove(
@@ -305,11 +313,14 @@ struct ContentView: View {
                             velocity: CGSize(width: 0, height: -forceMagnitude)
                         )
                         
-                        // Quicker secondary push
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {  // Reduced from 0.1
+                        // Scale secondary push as well
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                             self.physicsManager.applyShove(
                                 to: message.id,
-                                velocity: CGSize(width: 0, height: -forceMagnitude * 0.2)  // Reduced secondary force
+                                velocity: CGSize(
+                                    width: 0,
+                                    height: -forceMagnitude * 0.2 * intensityMultiplier
+                                )
                             )
                         }
                     }
@@ -353,14 +364,17 @@ struct ChatHeader: View {
             .padding(.horizontal)
             
             VStack(spacing: 2) {
-                // Profile picture - using a placeholder
+                // Profile picture with blue background
                 ZStack {
                     Circle()
                         .fill(Color(UIColor.systemBlue.withAlphaComponent(0.2)))
                         .frame(width: 50, height: 50)
                     
-                    Text("👨🏽‍💻")
-                        .font(.system(size: 24))
+                    Image("profile") // Make sure to add this image to your assets
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 36, height: 36)  // Slightly smaller than the background
+                        .clipShape(Circle())
                 }
                 
                 HStack {
@@ -451,12 +465,24 @@ struct PhysicsMessageBubble: View {
                 .offset(physicsManager.messageOffsets[message.id] ?? .zero)
                 .onChange(of: isDramatic) { _, newValue in
                     if newValue {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                        // Use same spring parameters as reset
+                        withAnimation(
+                            .spring(
+                                response: 0.2,
+                                dampingFraction: 0.4,
+                                blendDuration: 0.2
+                            )
+                        ) {
                             isAnimating = true
                         }
-                        // Reset after a short delay
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            withAnimation(
+                                .spring(
+                                    response: 0.2,
+                                    dampingFraction: 0.4,
+                                    blendDuration: 0.2
+                                )
+                            ) {
                                 isAnimating = false
                             }
                         }
@@ -496,12 +522,12 @@ struct MessageRow: View {
                     .rotationEffect(isAnimating ? .degrees(2) : .zero)
                     .onChange(of: isDramatic) { _, newValue in
                         if newValue {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                            withAnimation(.spring(response: 0.2, dampingFraction: 0.4)) {  // Match bubble animation
                                 isAnimating = true
                             }
-                            // Reset after a short delay
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                            // Match bubble reset timing
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                withAnimation(.spring(response: 0.2, dampingFraction: 0.4)) {
                                     isAnimating = false
                                 }
                             }
@@ -512,7 +538,7 @@ struct MessageRow: View {
                 Spacer()
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 1)
     }
 }
 
