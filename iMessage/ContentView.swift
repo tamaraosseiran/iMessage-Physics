@@ -32,6 +32,17 @@ class MessagePhysicsManager: ObservableObject {
     // Add reference to messages
     private var messages: [Message] = []
     
+    // Track last dramatic message timestamp
+    private var lastDramaticTimestamp: Date? = nil
+    
+    // Physics constants (now base values)
+    var springStiffness: CGFloat = 20.0
+    var damping: CGFloat = 0.94
+    let mass: CGFloat = 0.8
+    let collisionElasticity: CGFloat = 0.5
+    let maxVelocity: CGFloat = 12000
+    let minMessageSpacing: CGFloat = 60.0
+    
     // Function to update messages reference
     func updateMessages(_ newMessages: [Message]) {
         messages = newMessages
@@ -40,13 +51,23 @@ class MessagePhysicsManager: ObservableObject {
     private var displayLink: CADisplayLink?
     private var lastUpdateTime: CFTimeInterval = 0
     
-    // Adjust physics constants for faster settling
-    let springStiffness: CGFloat = 12.0      // Increased for faster return
-    let damping: CGFloat = 0.9               // More damping for faster settling
-    let mass: CGFloat = 0.6                  // Lighter mass for quicker response
-    let collisionElasticity: CGFloat = 0.5   // Less bounce
-    let maxVelocity: CGFloat = 12000         // Keep high initial velocity
-    let minMessageSpacing: CGFloat = 60.0
+    // Intensity multiplier with exponential decay
+    func intensityMultiplier(for exclamationCount: Int) -> CGFloat {
+        let maxIntensity: CGFloat = 2.0
+        let normalized = min(CGFloat(exclamationCount), 5) / 5.0
+        let base = 1.0 + (maxIntensity - 1.0) * pow(normalized, 1.7)
+        
+        // Decay based on time since last dramatic message
+        let now = Date()
+        let decayDuration: TimeInterval = 0.4 // was 1.0, now much faster
+        var decay: CGFloat = 1.0
+        if let last = lastDramaticTimestamp {
+            let dt = now.timeIntervalSince(last)
+            decay = CGFloat(exp(-dt / decayDuration))
+        }
+        lastDramaticTimestamp = now
+        return base * (1.0 - 0.7 * decay) // was 0.5, now more aggressive fade
+    }
     
     func startPhysics() {
         guard displayLink == nil else { return }
@@ -61,36 +82,45 @@ class MessagePhysicsManager: ObservableObject {
     func stopPhysics() {
         displayLink?.invalidate()
         displayLink = nil
+
+        // Animate all messageOffsets back to zero with higher damping and stiffness
+        withAnimation(.interpolatingSpring(stiffness: 120, damping: 20)) {
+            self.messageOffsets = self.messageOffsets.mapValues { _ in .zero }
+        }
+
+        // Wait for the animation to finish, then clear everything and guarantee a clean state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            self.messageOffsets.removeAll()
+            self.messageVelocities.removeAll()
+        }
     }
     
-    func applyShove(to messageId: UUID, velocity: CGSize) {
+    func applyShove(to messageId: UUID, velocity: CGSize, intensity: CGFloat = 1.0) {
         if messageOffsets[messageId] == nil {
             messageOffsets[messageId] = .zero
         }
         messageVelocities[messageId] = velocity
+        // Adjust spring/damping for this impact
+        let baseStiffness: CGFloat = 20.0
+        let baseDamping: CGFloat = 0.94
+        springStiffness = baseStiffness + 20.0 * (intensity - 1.0)
+        damping = min(0.98, baseDamping + 0.03 * (intensity - 1.0))
         startPhysics()
         
-        // Natural settling animation
+        // After the impact, set all velocities to zero and use a strong, quick spring for return
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            withAnimation(
-                .interpolatingSpring(
-                    mass: 1.2,              // Slightly more mass for more inertia
-                    stiffness: 40,          // Much lower stiffness for gentler return
-                    damping: 8,             // Lower damping for gradual settling
-                    initialVelocity: 0.2    // Subtle initial velocity
-                ).speed(0.7)                // Slow down the overall animation
-            ) {
-                self.messageOffsets.removeAll()
-                self.messageVelocities.removeAll()
-                self.stopPhysics()
+            for id in self.messageVelocities.keys {
+                self.messageVelocities[id] = .zero
             }
+            self.springStiffness = 120.0   // Higher for faster return
+            self.damping = 1.2            // More overdamped to prevent bouncing
         }
     }
     
     private func updateAllMessages() {
         let currentTime = CACurrentMediaTime()
         let rawDeltaTime = currentTime - lastUpdateTime
-        let deltaTime = min(rawDeltaTime, 1.0/60.0) // Clamp deltaTime
+        let deltaTime = min(rawDeltaTime, 1.0/60.0)
         lastUpdateTime = currentTime
         
         var stillMoving = false
@@ -107,9 +137,12 @@ class MessagePhysicsManager: ObservableObject {
             let accelerationX = springForceX / mass
             let accelerationY = springForceY / mass
             
-            // Update velocity with clamping
-            velocity.width = clampVelocity((velocity.width + CGFloat(accelerationX * deltaTime)) * damping)
-            velocity.height = clampVelocity((velocity.height + CGFloat(accelerationY * deltaTime)) * damping)
+            // Update velocity with clamping and stronger damping near zero
+            let velocityMagnitude = sqrt(velocity.width * velocity.width + velocity.height * velocity.height)
+            let dampingFactor = velocityMagnitude < 100 ? 0.8 : damping
+            
+            velocity.width = clampVelocity((velocity.width + CGFloat(accelerationX * deltaTime)) * dampingFactor)
+            velocity.height = clampVelocity((velocity.height + CGFloat(accelerationY * deltaTime)) * dampingFactor)
             
             // Update position
             var newOffset = offset
@@ -159,8 +192,7 @@ class MessagePhysicsManager: ObservableObject {
             messageVelocities[id] = velocity
             
             // More precise movement detection
-            let speed = sqrt(velocity.width * velocity.width +
-                           velocity.height * velocity.height)
+            let speed = sqrt(velocity.width * velocity.width + velocity.height * velocity.height)
             if speed > 0.5 {
                 stillMoving = true
             }
@@ -168,8 +200,6 @@ class MessagePhysicsManager: ObservableObject {
         
         if !stillMoving {
             stopPhysics()
-            messageOffsets.removeAll()
-            messageVelocities.removeAll()
         }
         
         // Add order constraints
@@ -183,23 +213,25 @@ class MessagePhysicsManager: ObservableObject {
         }
         
         // Enforce ordering constraints
-        for i in 0..<sortedMessages.count-1 {
-            let currentId = sortedMessages[i]
-            let nextId = sortedMessages[i+1]
-            
-            if let currentOffset = messageOffsets[currentId],
-               var nextOffset = messageOffsets[nextId] {
-                // If next message is higher than current, push it down
-                if nextOffset.height < currentOffset.height - minMessageSpacing {
-                    nextOffset.height = currentOffset.height - minMessageSpacing
-                    messageOffsets[nextId] = nextOffset
-                    
-                    // Adjust velocity to prevent bouncing
-                    var velocity = messageVelocities[nextId] ?? .zero
-                    if velocity.height < 0 {
-                        velocity.height *= 0.5
+        if sortedMessages.count > 1 {
+            for i in 0..<(sortedMessages.count - 1) {
+                let currentId = sortedMessages[i]
+                let nextId = sortedMessages[i+1]
+                
+                if let currentOffset = messageOffsets[currentId],
+                   var nextOffset = messageOffsets[nextId] {
+                    // If next message is higher than current, push it down
+                    if nextOffset.height < currentOffset.height - minMessageSpacing {
+                        nextOffset.height = currentOffset.height - minMessageSpacing
+                        messageOffsets[nextId] = nextOffset
+                        
+                        // Adjust velocity to prevent bouncing
+                        var velocity = messageVelocities[nextId] ?? .zero
+                        if velocity.height < 0 {
+                            velocity.height *= 0.5
+                        }
+                        messageVelocities[nextId] = velocity
                     }
-                    messageVelocities[nextId] = velocity
                 }
             }
         }
@@ -233,6 +265,7 @@ struct ContentView: View {
     @State private var newMessageText = ""
     @State private var showingSharePrompt = false
     @State private var dramaticMessageId: UUID? = nil
+    @State private var shouldScrollToBottom = false
     
     private var chatList: some View {
         ScrollViewReader { proxy in
@@ -251,9 +284,13 @@ struct ContentView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 16)
             }
-            .onChange(of: messages.count) { _, _ in
-                withAnimation {
-                    proxy.scrollTo(messages.last?.id, anchor: .bottom)
+            .frame(maxHeight: .infinity)
+            .onChange(of: shouldScrollToBottom) { _, newValue in
+                if newValue {
+                    withAnimation {
+                        proxy.scrollTo(messages.last?.id, anchor: .bottom)
+                    }
+                    shouldScrollToBottom = false
                 }
             }
         }
@@ -291,13 +328,13 @@ struct ContentView: View {
             
             // Count exclamation marks and calculate intensity with adjusted curve
             let exclamationCount = newMessageText.filter { $0 == "!" }.count
-            let baseMultiplier = CGFloat(0.4) // Start with a lower base multiplier
-            let intensityMultiplier = baseMultiplier + (CGFloat(min(exclamationCount, 5) - 1) * 0.9)
+            let intensity = physicsManager.intensityMultiplier(for: exclamationCount)
             
             // Scale initial force with adjusted multiplier
             physicsManager.applyShove(
                 to: newMessage.id,
-                velocity: CGSize(width: 0, height: -8000 * intensityMultiplier)
+                velocity: CGSize(width: 0, height: -12000 * intensity),
+                intensity: intensity
             )
             
             let messageCount = messages.count
@@ -305,13 +342,14 @@ struct ContentView: View {
                 if message.id != newMessage.id && index < messageCount - 1 {
                     let distanceFromNew = messageCount - 1 - index
                     // Scale force magnitude with adjusted multiplier
-                    let forceMagnitude = CGFloat(14000.0 * intensityMultiplier * exp(-Double(distanceFromNew) * 0.3))
+                    let forceMagnitude = CGFloat(20000.0 * intensity * exp(-Double(distanceFromNew) * 0.3))
                     let delay = 0.02 * Double(distanceFromNew)
                     
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         self.physicsManager.applyShove(
                             to: message.id,
-                            velocity: CGSize(width: 0, height: -forceMagnitude)
+                            velocity: CGSize(width: 0, height: -forceMagnitude),
+                            intensity: intensity
                         )
                         
                         // Scale secondary push as well
@@ -320,8 +358,9 @@ struct ContentView: View {
                                 to: message.id,
                                 velocity: CGSize(
                                     width: 0,
-                                    height: -forceMagnitude * 0.2 * intensityMultiplier
-                                )
+                                    height: -forceMagnitude * 0.2 * intensity
+                                ),
+                                intensity: intensity
                             )
                         }
                     }
@@ -330,13 +369,14 @@ struct ContentView: View {
         }
         
         newMessageText = ""
+        shouldScrollToBottom = true
     }
 }
 
 struct ChatHeader: View {
     let name: String
     @Binding var showSharePrompt: Bool
-    
+
     var body: some View {
         ZStack {
             HStack {
